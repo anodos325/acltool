@@ -180,7 +180,7 @@ iter_acls(struct acl_info *w)
 					rval = w->ops->strip_acl_fn(w, entry);
 					break;
 				}
-				rval = w->ops->set_acl_fn(w, entry, w->source_acl);
+				rval = w->ops->set_acl_fn(w, entry, w->source_acl, false);
 				break;
 			}
 		}
@@ -235,7 +235,7 @@ iter_acls(struct acl_info *w)
 
 				}
 				else {
-					rval = w->ops->set_acl_fn(w, entry, NULL);
+					rval = w->ops->set_acl_fn(w, entry, NULL, false);
 				}
 				break;
 
@@ -384,6 +384,13 @@ main(int argc, char **argv)
 				usage(argv[0]);
 			}
 	}
+
+	if (w->path == NULL) {
+		errno = EINVAL;
+		warn("Path [-p] must be specified");
+		usage(argv[0]);
+	}
+
 	/* set the source to the destination if we lack -s */
 	if (w->source == NULL) {
 		if (w->flags & WA_RESTORE) {
@@ -451,7 +458,7 @@ main(int argc, char **argv)
 	if (w->flags & WA_CLONE){
 		fake_ftsent.fts_path = w->source;
 		fake_ftsent.fts_statp = &w->st;
-		w->source_acl = w->ops->get_acl_fn(w, &fake_ftsent);
+		w->source_acl = w->ops->get_acl_fn(w, &fake_ftsent, false);
 		if (w->source_acl == NULL) {
 			err(EX_OSERR, "%s: acl_get_file() failed", w->source);
 			free_acl_info(w);

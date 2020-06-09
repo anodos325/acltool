@@ -1,5 +1,6 @@
 CC = gcc
 CFLAGS = -Wall
+CFLAGS += -g
 CPPFLAGS += -I/usr/include/sys
 LDADD += -lacl
 

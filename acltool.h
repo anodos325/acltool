@@ -54,8 +54,8 @@ struct acl_info;
 struct acl_ops {
 	int (*restore_acl_fn)(struct acl_info *w, char *relpath, FTSENT *fts_entry, size_t slen);
 	int (*calculate_inherited_acl_fn)(struct acl_info *w, struct acl_obj *parent_acl, int depth);
-	int (*set_acl_fn)(struct acl_info *w, FTSENT *fts_entry, struct acl_obj *to_set);
-	struct acl_obj *(*get_acl_fn)(struct acl_info *w, FTSENT *fts_entry);
+	int (*set_acl_fn)(struct acl_info *w, FTSENT *fts_entry, struct acl_obj *to_set, bool quiet);
+	struct acl_obj *(*get_acl_fn)(struct acl_info *w, FTSENT *fts_entry, bool quiet);
 	int (*get_acl_parent_fn)(struct acl_info *w, FTSENT *fts_entry);
 	int (*strip_acl_fn)(struct acl_info *w, FTSENT *fts_entry);
 	int (*acl_cmp_fn)(struct acl_obj source, struct acl_obj dest, int flags);

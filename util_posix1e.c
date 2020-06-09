@@ -8,6 +8,7 @@
 #include <pwd.h>
 #include <stdio.h>
 #include <stdbool.h>
+#include <stddef.h>
 #include <string.h>
 #include <stdlib.h>
 #include <sysexits.h>
@@ -136,12 +137,8 @@ strip_acl_posix1e(struct acl_info *w, FTSENT *fts_entry)
 		path = w->path;
 	else
 		path = fts_entry->fts_accpath;
-#if 0
-	if (w->flags & WA_VERBOSE)
-		fprintf(stdout, "%s\n", path);
-#endif
 
-	theacl = w->ops->get_acl_fn(w, fts_entry); 
+	theacl = w->ops->get_acl_fn(w, fts_entry, true);
 	if (theacl->dacl != NULL) {
 		acl_free(theacl->dacl);
 		theacl->dacl = NULL;
@@ -157,7 +154,7 @@ strip_acl_posix1e(struct acl_info *w, FTSENT *fts_entry)
 		fprintf(stdout, "Failed to remove extended entries\n");
 		return -1;
 	}
-	ret = w->ops->set_acl_fn(w, fts_entry, theacl);
+	ret = w->ops->set_acl_fn(w, fts_entry, theacl, true);
 	if (ret != 0) {
 		fprintf(stdout, "Failed to set new acl\n");
 		return -1;
@@ -194,7 +191,7 @@ int get_acl_parent_posix1e(struct acl_info *w, FTSENT *fts_entry)
                 fake_ftsent.fts_path = w->source;
                 fake_ftsent.fts_statp = &w->st;
 
-		parent_acl = w->ops->get_acl_fn(w, &fake_ftsent);
+		parent_acl = w->ops->get_acl_fn(w, &fake_ftsent, true);
 		if (parent_acl == NULL) {
 			return -1;
 		}
@@ -308,29 +305,55 @@ int acl_cmp_posix1e(struct acl_obj source, struct acl_obj dest, int flags)
 	if ((source.dacl != NULL) && (dest.dacl != NULL)) {
 		rv = acl_cmp_internal(source.dacl, dest.dacl, flags);
 		if (rv != 0) {
-			return rv;
+			return -1;
 		}
 		rv = acl_cmp_internal(source.facl, dest.facl, flags);
 		if (rv != 0) {
-			return rv;
+			return -1;
 		}
+		return 0;
 	}
-	else if ((source.facl != NULL) && (dest.facl != NULL) && (source.dacl == dest.dacl)) {
+	else if ((source.facl != NULL) && (dest.facl != NULL)) {
 		rv = acl_cmp_internal(source.facl, dest.facl, flags);
 		if (rv != 0) {
-			return rv;
+			return -1;
 		}
+		return 0;
 	}
 	return -1;
+}
+
+static bool
+get_parent_path(char *dir)
+{
+	ptrdiff_t len;
+	char *p = NULL;
+	for (;;)
+	{
+		p = strrchr(dir, '/');
+		if (p == NULL) {
+			return false;
+		}
+		len = p-dir;
+		dir[len] = '\0';
+		if (access(dir, F_OK) == 0) {
+			break;
+		}
+	}
+	return true;
 }
 
 int
 restore_acl_posix1e(struct acl_info *w, char *relpath, FTSENT *fts_entry, size_t slen)
 {
-#if 0
 	int rval;
-	acl_t acl_new, acl_old;
+	bool found_parent = false;
+	struct acl_obj *acl_new = NULL;
+	struct acl_obj *acl_old = NULL;
+	struct acl_obj *to_set = NULL;
+	FTSENT new;
 	char shadow_path[PATH_MAX] = {0};
+	char *tmp_name = NULL;
 
 	if (strlen(relpath) + slen > PATH_MAX) {
 		warn("%s: path in snapshot directory is too long", relpath);
@@ -342,21 +365,31 @@ restore_acl_posix1e(struct acl_info *w, char *relpath, FTSENT *fts_entry, size_t
 		warn("%s: snprintf failed", relpath);
 		return -1;
 	}
-
-	acl_new = acl_get_file(shadow_path, ACL_TYPE_ACCESS);
+	ZERO_STRUCT(new);
+	new.fts_path = shadow_path;
+	new.fts_statp = fts_entry->fts_statp; //we only care about whether this is a dir.
+	acl_new = w->ops->get_acl_fn(w, &new, true);
 	if (acl_new == NULL) {
 		if (errno == ENOENT) {
 			if (w->flags & WA_FORCE) {
-				rval = get_acl_parent(w, fts_entry);
-				if (rval != 0) {
+				tmp_name = strdup(shadow_path);
+				found_parent = get_parent_path(tmp_name);
+				if (!found_parent) {
+					free(tmp_name);
 					fprintf(stdout, "! %s\n", shadow_path);
 					return 0;
 				}
-				acl_new = acl_dup(IS_DIR(fts_entry) ? w->acls[0].facl : w->acls[0].dacl);
+				new.fts_path = tmp_name;
+				acl_new = w->ops->get_acl_fn(w, &new, true);
 				if (acl_new == NULL) {
-					warn("%s: acl_dup() failed", shadow_path);
+					warn("%s: OP_GET_ACL() failed", shadow_path);
+					free(tmp_name);
 					return -1;
 				}
+				free(tmp_name);
+				w->ops->calculate_inherited_acl_fn(w, acl_new, 0);
+				to_set = &w->acls[0];
+				//to_set = acl_new;
 			}
 			else {
 				fprintf(stdout, "! %s\n", shadow_path);
@@ -364,18 +397,22 @@ restore_acl_posix1e(struct acl_info *w, char *relpath, FTSENT *fts_entry, size_t
 			}
 		}
 		else {
-			warn("%s: acl_get_file() failed", shadow_path);
+			warn("%s: OP_GET_ACL() failed", shadow_path);
 			return (-1);
 		}
 	}
+	else {
+		to_set = acl_new;
+	}
 
-	acl_old = acl_get_file(fts_entry->fts_path, ACL_TYPE_NFS4);
+	acl_old = w->ops->get_acl_fn(w, fts_entry, true);
 	if (acl_old == NULL) {
-		warn("%s: acl_get_file() failed", fts_entry->fts_path);
+		warn("%s: OP_GETACL() failed", fts_entry->fts_path);
 		return (-1);
 	}
 
-	rval = acl_cmp(acl_new, acl_old, w->flags);
+	rval = w->ops->acl_cmp_fn(*to_set, *acl_old, w->flags);
+
 	if (rval == 0) {
 		return 0;
 	}
@@ -386,24 +423,22 @@ restore_acl_posix1e(struct acl_info *w, char *relpath, FTSENT *fts_entry, size_t
 			fts_entry->fts_path);
 	}
 	if ((w->flags & WA_TRIAL) == 0) {
-		rval = acl_set_file(fts_entry->fts_accpath,
-				    ACL_TYPE_NFS4, acl_new);
+		rval = w->ops->set_acl_fn(w, fts_entry, to_set, true);
 		if (rval < 0) {
-			warn("%s: acl_set_file() failed", fts_entry->fts_accpath);
-			acl_free(acl_old);
-			acl_free(acl_new);
+			warn("%s: OP_SET_ACL() failed", fts_entry->fts_path);
+			w->ops->acl_free_fn(acl_old);
+			w->ops->acl_free_fn(acl_new);
 			return -1;
 		}
 	}
 
-	acl_free(acl_old);
-	acl_free(acl_new);
-#endif
+	w->ops->acl_free_fn(acl_old);
+	w->ops->acl_free_fn(acl_new);
 	return 0;
 }
 
 struct acl_obj
-*get_acl_posix1e(struct acl_info *w, FTSENT *ftsentry)
+*get_acl_posix1e(struct acl_info *w, FTSENT *ftsentry, bool quiet)
 {
 	struct acl_obj *ret_acl = NULL;
 	ret_acl = calloc(1, sizeof(struct acl_obj));
@@ -412,12 +447,15 @@ struct acl_obj
 	}
 	ret_acl->facl = acl_get_file(ftsentry->fts_path, ACL_TYPE_ACCESS);
 	if (ret_acl->facl == NULL) {
-		fprintf(stdout, "failed to get ACL on %s\n", ftsentry->fts_path);
+		if (!quiet) {
+			fprintf(stdout, "failed to get ACL on %s\n", ftsentry->fts_path);
+		}
+		free(ret_acl);
 		return NULL;
 	}
 	if (ISDIR(ftsentry)) {
 		ret_acl->dacl = acl_get_file(ftsentry->fts_path, ACL_TYPE_DEFAULT);
-		if (ret_acl->dacl == NULL) {
+		if (!quiet && ret_acl->dacl == NULL) {
 			fprintf(stdout, "failed to get DACL on %s\n", ftsentry->fts_path);
 			return NULL;
 		}
@@ -431,12 +469,12 @@ struct acl_obj
 }
 
 int
-set_acl_posix1e(struct acl_info *w, FTSENT *fts_entry, struct acl_obj *theacl)
+set_acl_posix1e(struct acl_info *w, FTSENT *fts_entry, struct acl_obj *theacl, bool quiet)
 {
 	char *path = NULL;
 	struct acl_obj *acl_new;
 	int acl_depth = 0;
-	if (w->flags & WA_VERBOSE) {
+	if (!quiet && w->flags & WA_VERBOSE) {
 		fprintf(stdout, "%s\n", fts_entry->fts_path);
 	}
 
